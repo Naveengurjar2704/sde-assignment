@@ -51,6 +51,7 @@ from src.tasks.celery_app import celery_app
 from src.services.recording import fetch_and_upload_recording
 from src.utils.audit_logger import audit
 from src.utils.db import get_db_session
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,12 @@ logger = logging.getLogger(__name__)
 @celery_app.task(
     name="fetch_and_upload_recording_task",
     bind=True,
-    max_retries=2,
+    max_retries=settings.POSTCALL_RECORDING_MAX_RETRIES,
     
     default_retry_delay=120,
     acks_late=True,
 
-    queue="postcall_recording",
+    queue=settings.POSTCALL_RECORDING_QUEUE,
 )
 def fetch_and_upload_recording_task(self, payload: Dict[str, Any]):
     """
@@ -98,7 +99,7 @@ def fetch_and_upload_recording_task(self, payload: Dict[str, Any]):
             },
         )
 
-        raise self.retry(exc=exc, countdown=120)
+        raise self.retry(exc=exc, countdown=settings.POSTCALL_RECORDING_RETRY_DELAY)
     finally:
         loop.close()
 

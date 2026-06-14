@@ -614,7 +614,7 @@ cache, merged with `COALESCE(interaction_metadata, '{}') || :patch`) and to
 
 ## 11\. Security
 
-### Implemented 
+### Implemented
 
 -   **Recordings in S3:** server-side encryption with `ServerSideEncryption="AES256"`  
     (SSE-S3) on every `put_object`.
@@ -793,3 +793,8 @@ Removes the Redis backup for retries. The Postgres job table + recovery worker i
     
 8.  **Deploy the alert rules** to Grafana/PagerDuty — the thresholds and counters  
     already exist.
+    
+9.  **Short-call fast-path in the endpoint.** Currently calls with fewer than 4 transcript turns are still enqueued to `postcall_skip`, written to `processing_jobs`, and picked up by a worker that immediately exits after re-checking the turn count. At 100K calls/campaign this creates thousands of pointless jobs. The fix is to detect short calls in the endpoint before creating the job — update the lead stage to `short_call` directly and return immediately, skipping Redis, the worker, and the database job row entirely.
+    
+
+* * *

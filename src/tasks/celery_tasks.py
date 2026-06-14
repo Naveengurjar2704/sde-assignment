@@ -1,4 +1,3 @@
-
 """
 Celery tasks for post-call processing.
 
@@ -93,6 +92,7 @@ from src.services.llm_scheduler import llm_rate_limiter
 from src.services.metrics import metrics_tracker
 from src.utils.audit_logger import audit
 from src.utils.db import get_db_session
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,8 @@ _COLD_KEYWORDS = [
     "don't call",
     "remove",
     "already done",      
-    "already bought",    
+    "already bought",
+     "already booked",    
     "callback",
     "call back",
     "later",
@@ -146,7 +147,10 @@ _NEGATION_WORDS = frozenset({
 })
 
 
+
+   
 def _score_keywords_with_negation(text_content: str, keywords: list) -> int:
+    
     """
     Count how many keywords appear in the text, but SKIP a keyword hit if a
     negation word appears in the same clause as the keyword.
@@ -165,19 +169,19 @@ def _score_keywords_with_negation(text_content: str, keywords: list) -> int:
         → "booked" counted (no negation in "but i already booked it")
         → returns 1
     """
-   
     clauses = re.split(r'[.,!?;]', text_content)
 
     score = 0
     for keyword in keywords:
+        keyword_words = set(keyword.split())
         for clause in clauses:
             if keyword in clause:
-          
                 words_in_clause = set(clause.split())
-                if not words_in_clause.intersection(_NEGATION_WORDS):
-
+                # Negation words that are part of the keyword itself
+                # (e.g. cold keyword "don't call") shouldn't cancel the match.
+                negations = (words_in_clause - keyword_words) & _NEGATION_WORDS
+                if not negations:
                     score += 1
-              
                 break
 
     return score
@@ -238,12 +242,12 @@ def _queue_for_lane(lane: str) -> str:
     commands include:  --queues postcall_hot,postcall_cold,postcall_skip
     """
     mapping = {
-        "hot":  "postcall_hot",
-        "cold": "postcall_cold",
-        "skip": "postcall_skip",
+        "hot":  settings.POSTCALL_HOT_QUEUE,
+        "cold": settings.POSTCALL_COLD_QUEUE,
+        "skip": settings.POSTCALL_SKIP_QUEUE,
     }
 
-    return mapping.get(lane, "postcall_cold")
+    return mapping.get(lane, settings.POSTCALL_COLD_QUEUE)
 
 
 # ── Date parsing helper ────────────────────────────────────────────────────────
@@ -275,7 +279,8 @@ def _parse_iso_datetime(dt_string: str) -> datetime:
     max_retries=5,
     acks_late=True,
 
-    queue="postcall_hot",
+   
+    queue=settings.POSTCALL_HOT_QUEUE,
 )
 def process_interaction_end_background_task(self, payload: Dict[str, Any]):
     """
@@ -302,12 +307,7 @@ def process_interaction_end_background_task(self, payload: Dict[str, Any]):
     On failure: retries up to 5 times with exponential backoff.
     Retry delays: 60s, 120s, 240s, 480s, 960s (~16 minutes total wait).
     """
-    # BUG #5 FIX: Always set the event loop BEFORE running any async code.
-    # Celery workers run sync functions, so we create a new event loop per task.
-    # Without set_event_loop(), SQLAlchemy's async engine (which has its own
-    # internal tasks and futures) can end up bound to a DIFFERENT loop, causing
-    # "Future attached to a different loop" errors when the pool is shared
-    # across multiple task invocations.
+  
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -337,7 +337,7 @@ def process_interaction_end_background_task(self, payload: Dict[str, Any]):
             )
         )
 
-        retry_delay = 60 * (2 ** self.request.retries)
+        retry_delay = settings.POSTCALL_MAIN_RETRY_BASE_DELAY * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=retry_delay)
 
     finally:
@@ -412,7 +412,7 @@ async def _process_interaction(task, payload: Dict[str, Any]) -> None:
                 "call_sid":          ctx.call_sid,
                 "exotel_account_id": ctx.exotel_account_id or "",
             }],
-            queue="postcall_recording",
+            queue=settings.POSTCALL_RECORDING_QUEUE,
         )
         audit.info(
             "postcall_recording_dispatched",
@@ -433,7 +433,7 @@ async def _process_interaction(task, payload: Dict[str, Any]) -> None:
         )
 
 
-    estimated_tokens = payload.get("estimated_tokens", 1500)
+    estimated_tokens = payload.get("estimated_tokens", settings.LLM_AVG_TOKENS_PER_CALL)
     await llm_rate_limiter.acquire(
         customer_id=customer_id,
         estimated_tokens=estimated_tokens,
@@ -483,7 +483,7 @@ async def _process_interaction(task, payload: Dict[str, Any]) -> None:
                 "campaign_id":    ctx.campaign_id,
                 "analysis_result": analysis_result.raw_response,
             }],
-            queue="postcall_signal",
+            queue=settings.POSTCALL_SIGNAL_QUEUE,
             countdown=0,
         )
         signal_dispatched = True

@@ -123,17 +123,14 @@ async def fetch_and_upload_recording(
         },
     )
 
-
-    async with httpx.AsyncClient(timeout=10) as http_client:
-        recording_url = await _poll_for_recording_url(
-            interaction_id=interaction_id,
-            call_sid=call_sid,
-            exotel_account_id=exotel_account_id,
-            http_client=http_client,
-        )
+    recording_url = await _poll_for_recording_url(
+        interaction_id=interaction_id,
+        call_sid=call_sid,
+        exotel_account_id=exotel_account_id,
+    )
 
     if not recording_url:
-        await _persist_recording_to_db(
+        await _update_recording_in_db(
             interaction_id=interaction_id,
             s3_key=None,
             status="FAILED",
@@ -148,7 +145,7 @@ async def fetch_and_upload_recording(
 
     if not s3_key:
 
-        await _persist_recording_to_db(
+        await _update_recording_in_db(
             interaction_id=interaction_id,
             s3_key=None,
             status="FAILED",
@@ -156,7 +153,7 @@ async def fetch_and_upload_recording(
         return None
 
  
-    await _persist_recording_to_db(
+    await _update_recording_in_db(
         interaction_id=interaction_id,
         s3_key=s3_key,
         status="UPLOADED",
@@ -170,13 +167,14 @@ async def _poll_for_recording_url(
     interaction_id: str,
     call_sid: str,
     exotel_account_id: str,
-    http_client: httpx.AsyncClient,
 ) -> Optional[str]:
     """
     Repeatedly asks Exotel "is the recording ready?" with exponential backoff.
 
-    Uses the http_client passed in from the caller so all poll attempts share
-    one TCP connection to Exotel instead of opening a fresh one each time.
+    Each attempt opens its own short-lived connection via
+    _fetch_exotel_recording_url() — recordings can take many minutes to
+    become available, so holding a single HTTP connection open across the
+    whole poll loop isn't useful here and complicates testing/mocking.
 
     Three distinct outcomes are handled separately:
         - 404 (not ready yet)   → log INFO, keep polling. This is normal.
@@ -200,7 +198,6 @@ async def _poll_for_recording_url(
             recording_url = await _fetch_exotel_recording_url(
                 call_sid=call_sid,
                 account_id=exotel_account_id,
-                http_client=http_client,
             )
 
         except ExotelNetworkError as exc:
@@ -271,12 +268,11 @@ async def _poll_for_recording_url(
 async def _fetch_exotel_recording_url(
     call_sid: str,
     account_id: str,
-    http_client: httpx.AsyncClient,
 ) -> Optional[str]:
     """
     Makes ONE HTTP GET to Exotel asking for the recording URL of a call.
 
-    Uses the shared http_client passed in — no new connection per call.
+    Opens its own short-lived httpx.AsyncClient for this single request.
 
     Returns:
         str  — the recording URL if Exotel says it's ready (HTTP 200).
@@ -301,8 +297,8 @@ async def _fetch_exotel_recording_url(
 
     try:
         # AUTH: add  auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN)
-       
-        resp = await http_client.get(url)
+        async with httpx.AsyncClient(timeout=10) as http_client:
+            resp = await http_client.get(url)
 
     except httpx.HTTPError as exc:
         
@@ -344,10 +340,8 @@ async def _upload_to_s3_with_retry(
     """
     for attempt in range(1, S3_UPLOAD_MAX_RETRIES + 1):
         try:
-
-            s3_key = await asyncio.wait_for(
-                _upload_to_s3(recording_url=recording_url, interaction_id=interaction_id),
-                timeout=S3_UPLOAD_TIMEOUT_SECONDS,
+            s3_key = await _upload_to_s3(
+                recording_url=recording_url, interaction_id=interaction_id
             )
             logger.info(
                 "recording_s3_upload_complete",
@@ -359,16 +353,6 @@ async def _upload_to_s3_with_retry(
             )
             return s3_key
 
-        except asyncio.TimeoutError:
-            logger.warning(
-                "recording_s3_upload_timeout",
-                extra={
-                    "interaction_id": interaction_id,
-                    "attempt": attempt,
-                    "timeout_seconds": S3_UPLOAD_TIMEOUT_SECONDS,
-                },
-            )
-
         except Exception as exc:
             logger.warning(
                 "recording_s3_upload_attempt_failed",
@@ -379,7 +363,6 @@ async def _upload_to_s3_with_retry(
                     "error": str(exc),
                 },
             )
-
 
         if attempt < S3_UPLOAD_MAX_RETRIES:
             await asyncio.sleep(S3_UPLOAD_RETRY_DELAY_SECONDS)
@@ -458,7 +441,7 @@ async def _upload_to_s3(recording_url: str, interaction_id: str) -> str:
 
 
 
-async def _persist_recording_to_db(
+async def _update_recording_in_db(
     interaction_id: str,
     s3_key: Optional[str],
     status: str,

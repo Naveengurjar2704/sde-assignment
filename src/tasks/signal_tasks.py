@@ -29,6 +29,7 @@ from typing import Any, Dict
 
 from src.tasks.celery_app import celery_app
 from src.services.signal_jobs import trigger_signal_jobs
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,9 @@ _PERMANENT_ERRORS = (KeyError, ValueError, TypeError)
 @celery_app.task(
     name="dispatch_signal_jobs",
     bind=True,
-    max_retries=5,
+    max_retries=settings.POSTCALL_SIGNAL_MAX_RETRIES,
     acks_late=True,
-    queue="postcall_signal",
+    queue=settings.POSTCALL_SIGNAL_QUEUE,
 )
 def dispatch_signal_jobs(self, payload: Dict[str, Any]):
     """
@@ -98,7 +99,7 @@ def dispatch_signal_jobs(self, payload: Dict[str, Any]):
             },
         )
 
-        retry_delay = 30 * (2 ** self.request.retries)
+        retry_delay =  settings.POSTCALL_SIGNAL_RETRY_BASE_DELAY * (2 ** self.request.retries)
         raise self.retry(exc=exc, countdown=retry_delay)
 
     finally:

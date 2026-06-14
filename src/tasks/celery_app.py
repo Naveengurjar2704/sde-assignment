@@ -17,10 +17,12 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    task_default_queue=settings.POSTCALL_CELERY_QUEUE,
+    task_default_queue=settings.POSTCALL_COLD_QUEUE,
    
     beat_schedule={},
 )
 
 
-import src.tasks.recovery_worker  
+@celery_app.on_after_configure.connect
+def _register_recovery_worker(sender, **kwargs):
+    import src.tasks.recovery_worker  # noqa: F401

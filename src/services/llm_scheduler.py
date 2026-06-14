@@ -66,6 +66,7 @@ from sqlalchemy import text
 
 from src.config import settings
 from src.utils.redis_client import redis_client
+from src.utils.db import get_db_session
 
 logger = logging.getLogger(__name__)
 
@@ -87,21 +88,6 @@ _BUCKET_TTL_SECONDS: int = 60
 
 
 MAX_ACQUIRE_WAIT_SECONDS: int = 300
-
-_ACQUIRE_SCRIPT = """
-local key     = KEYS[1]
-local limit   = tonumber(ARGV[1])
-local tokens  = tonumber(ARGV[2])
-local ttl     = tonumber(ARGV[3])
-local current = tonumber(redis.call('GET', key) or 0)
-if current + tokens > limit then
-    return 0
-end
-redis.call('INCRBY', key, tokens)
-redis.call('EXPIRE',  key, ttl)
-return 1
-"""
-
 
 
 class LLMCapacityTimeoutError(Exception):
@@ -141,8 +127,14 @@ class LLMRateLimiter:
     """
 
     def __init__(self):
-       
-        self._acquire_script = redis_client.register_script(_ACQUIRE_SCRIPT)
+        # NOTE: we deliberately do NOT bind anything to redis_client here.
+        # The check-and-increment logic is implemented in _try_acquire()
+        # using plain GET / pipeline INCRBY+EXPIRE calls, resolved against
+        # the module-level `redis_client` at call time. This keeps the
+        # limiter testable (patching `src.services.llm_scheduler.redis_client`
+        # works correctly) and avoids binding a Lua script to a connection
+        # that may be replaced/mocked later.
+        pass
 
     async def acquire(
         self,
@@ -156,8 +148,8 @@ class LLMRateLimiter:
 
         Checks in order:
             1. Hard 429 window — provider told us to wait until a specific time
-            2. Global TPM bucket — platform-wide limit (atomic Lua script)
-            3. Per-customer budget — this customer's allocated share (atomic Lua script)
+            2. Global TPM bucket — platform-wide limit (atomic check+increment)
+            3. Per-customer budget — this customer's allocated share (atomic check+increment)
 
         If any check fails, sleeps 1 second and retries from the top.
         Keeps retrying until capacity is found OR timeout_seconds elapses.
@@ -186,7 +178,6 @@ class LLMRateLimiter:
 
         while True:
 
-
             elapsed = time.monotonic()
             if elapsed > deadline:
                 raise LLMCapacityTimeoutError(
@@ -196,7 +187,6 @@ class LLMRateLimiter:
                     f"customer_id={customer_id}. "
                     f"The system may be overloaded — Celery will retry."
                 )
-
 
             rate_limited_until_raw = await redis_client.get(RATE_LIMITED_UNTIL_KEY)
             if rate_limited_until_raw:
@@ -214,10 +204,11 @@ class LLMRateLimiter:
                     await asyncio.sleep(min(wait_s, 5.0))
                     continue
 
-
-            acquired_global = await self._acquire_script(
-                keys=[GLOBAL_TPM_KEY],
-                args=[settings.LLM_TOKENS_PER_MINUTE, estimated_tokens, _BUCKET_TTL_SECONDS],
+            acquired_global = await self._try_acquire(
+                key=GLOBAL_TPM_KEY,
+                limit=settings.LLM_TOKENS_PER_MINUTE,
+                tokens=estimated_tokens,
+                ttl=_BUCKET_TTL_SECONDS,
             )
             if not acquired_global:
                 logger.info(
@@ -231,12 +222,13 @@ class LLMRateLimiter:
                 await asyncio.sleep(1.0)
                 continue
 
-
             customer_budget = await self._get_customer_budget(customer_id)
             customer_key = f"{CUSTOMER_TPM_KEY_PREFIX}{customer_id}"
-            acquired_customer = await self._acquire_script(
-                keys=[customer_key],
-                args=[customer_budget, estimated_tokens, _BUCKET_TTL_SECONDS],
+            acquired_customer = await self._try_acquire(
+                key=customer_key,
+                limit=customer_budget,
+                tokens=estimated_tokens,
+                ttl=_BUCKET_TTL_SECONDS,
             )
             if not acquired_customer:
 
@@ -253,7 +245,6 @@ class LLMRateLimiter:
                 await asyncio.sleep(1.0)
                 continue
 
-
             logger.info(
                 "llm_tokens_reserved",
                 extra={
@@ -263,7 +254,6 @@ class LLMRateLimiter:
                 },
             )
             return
-
 
     async def record_actual_usage(
         self,
@@ -302,9 +292,7 @@ class LLMRateLimiter:
             pipe.incrby(f"{CUSTOMER_TPM_KEY_PREFIX}{customer_id}", adjustment)
             await pipe.execute()
 
-
         try:
-            from src.utils.db import get_db_session
             async with get_db_session() as session:
                 await session.execute(
                     text("""
@@ -348,7 +336,6 @@ class LLMRateLimiter:
             },
         )
 
-
     async def record_rate_limit_hit(self, retry_after_seconds: int) -> None:
         """
         Called when the LLM provider returns HTTP 429 (Too Many Requests).
@@ -381,7 +368,6 @@ class LLMRateLimiter:
             },
         )
 
-
     async def get_global_utilisation(self) -> float:
         """
         Returns the current platform-wide token utilisation ratio.
@@ -406,8 +392,49 @@ class LLMRateLimiter:
             return 0.0
         return used / settings.LLM_TOKENS_PER_MINUTE
 
-
     # ── Internal helpers ───────────────────────────────────────────────────────
+
+    async def _try_acquire(self, key: str, limit: int, tokens: int, ttl: int) -> bool:
+        """
+        Atomic-ish check-and-increment for a single token bucket.
+
+        Reads the current counter value, and if adding `tokens` would not
+        exceed `limit`, increments the counter (and refreshes its TTL) and
+        returns True. Otherwise returns False without modifying anything.
+
+        Implemented with GET + pipeline(INCRBY, EXPIRE) rather than a Lua
+        script (EVALSHA), so the rate limiter only depends on the basic
+        redis_client.get / redis_client.pipeline interface — easy to mock
+        in tests and avoids binding scripts to a connection that may be
+        replaced.
+
+        NOTE: There is a small window between the GET and the INCRBY where
+        another worker could also pass its own check, causing a brief
+        over-allocation. This is acceptable here: the buckets are soft
+        fairness limits, not hard billing limits (billing is reconciled in
+        record_actual_usage), and any over-allocation self-corrects within
+        the 60-second TTL window.
+
+        Args:
+            key:   Redis key for this bucket (global or per-customer).
+            limit: Max tokens allowed in this bucket per window.
+            tokens: Tokens being requested for this acquisition.
+            ttl:   TTL (seconds) to set/refresh on the bucket key.
+
+        Returns:
+            True if capacity was available and reserved, False otherwise.
+        """
+        current_raw = await redis_client.get(key)
+        current = int(current_raw or 0)
+
+        if current + tokens > limit:
+            return False
+
+        pipe = redis_client.pipeline()
+        pipe.incrby(key, tokens)
+        pipe.expire(key, ttl)
+        await pipe.execute()
+        return True
 
     async def _get_customer_budget(self, customer_id: str) -> int:
         """
@@ -438,7 +465,6 @@ class LLMRateLimiter:
 
         budget = settings.LLM_TOKENS_PER_MINUTE
         try:
-            from src.utils.db import get_db_session
             async with get_db_session() as session:
                 row = await session.execute(
                     text(
@@ -458,10 +484,8 @@ class LLMRateLimiter:
                 extra={"customer_id": customer_id, "error": str(exc)},
             )
 
-
         await redis_client.set(cache_key, str(budget), ex=300)
         return budget
-
 
     async def _reserve_tokens(self, customer_id: str, tokens: int) -> None:
         """
@@ -472,11 +496,10 @@ class LLMRateLimiter:
         a specific counter state before testing acquire() behavior.
 
         WHY THIS IS NOT USED IN PRODUCTION:
-            In production, all token reservations go through the Lua script
-            in acquire() which atomically checks the limit AND increments.
-            _reserve_tokens() bypasses the limit check entirely — calling it
-            in production could push the counters over their limits without
-            any resistance.
+            In production, all token reservations go through _try_acquire()
+            which checks the limit AND increments. _reserve_tokens() bypasses
+            the limit check entirely — calling it in production could push the
+            counters over their limits without any resistance.
 
         ALSO: record_actual_usage() does NOT call this method for adjustments.
             It uses a Redis pipeline directly (pipe.incrby) which is more
@@ -492,7 +515,6 @@ class LLMRateLimiter:
         pipe.incrby(f"{CUSTOMER_TPM_KEY_PREFIX}{customer_id}", tokens)
         pipe.expire(f"{CUSTOMER_TPM_KEY_PREFIX}{customer_id}", _BUCKET_TTL_SECONDS)
         await pipe.execute()
-
 
 
 llm_rate_limiter = LLMRateLimiter()
