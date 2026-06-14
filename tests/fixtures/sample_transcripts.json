@@ -1,0 +1,126 @@
+{
+  "transcripts": {
+    "rebook_confirmed": {
+      "description": "Customer confirms rebooking an appointment — HIGH VALUE, should be processed immediately",
+      "transcript": [
+        {"role": "agent", "content": "Hello, am I speaking with Mr. Sharma?"},
+        {"role": "customer", "content": "Haan ji, bol raha hoon."},
+        {"role": "agent", "content": "Sir, I'm calling from Cashify regarding your phone evaluation. Your appointment was scheduled for yesterday but we couldn't connect. Can we reschedule?"},
+        {"role": "customer", "content": "Oh haan, kal main busy tha. Tomorrow works for me."},
+        {"role": "agent", "content": "Sure sir, what time works for you tomorrow?"},
+        {"role": "customer", "content": "3 PM ke baad chalega."},
+        {"role": "agent", "content": "I'll book your slot for 3:30 PM tomorrow. Is that fine?"},
+        {"role": "customer", "content": "Haan theek hai, confirmed."},
+        {"role": "agent", "content": "Thank you sir. Our executive will visit you tomorrow at 3:30 PM. Thank you and have a good day."},
+        {"role": "customer", "content": "Thank you, bye."}
+      ],
+      "expected_disposition": "rebook_confirmed",
+      "expected_lane": "hot"
+    },
+
+    "not_interested": {
+      "description": "Customer clearly not interested — LOW VALUE, can be processed in batch",
+      "transcript": [
+        {"role": "agent", "content": "Hello, am I speaking with Ms. Gupta?"},
+        {"role": "customer", "content": "Yes."},
+        {"role": "agent", "content": "Ma'am, I'm calling from XYZ regarding the insurance plan you inquired about."},
+        {"role": "customer", "content": "I'm not interested. Please don't call me again."},
+        {"role": "agent", "content": "I understand ma'am. Sorry for the inconvenience. Have a good day."},
+        {"role": "customer", "content": "Bye."}
+      ],
+      "expected_disposition": "not_interested",
+      "expected_lane": "cold"
+    },
+
+    "callback_requested": {
+      "description": "Customer asks to be called back later — MEDIUM VALUE, ambiguous",
+      "transcript": [
+        {"role": "agent", "content": "Hello sir, am I speaking with Rajesh?"},
+        {"role": "customer", "content": "Haan, kaun bol raha hai?"},
+        {"role": "agent", "content": "Sir, I'm calling from ABC about your loan application."},
+        {"role": "customer", "content": "Abhi main meeting mein hoon, baad mein call karo."},
+        {"role": "agent", "content": "Sure sir, when should I call you back?"},
+        {"role": "customer", "content": "Shaam ko 6 baje ke baad."},
+        {"role": "agent", "content": "Okay sir, I'll call you after 6 PM today. Thank you."},
+        {"role": "customer", "content": "Theek hai."}
+      ],
+      "expected_disposition": "callback_requested",
+      "expected_lane": "cold"
+    },
+
+    "demo_booked": {
+      "description": "Customer books a product demo — HIGH VALUE, should be processed immediately",
+      "transcript": [
+        {"role": "agent", "content": "Good afternoon, am I speaking with Priya?"},
+        {"role": "customer", "content": "Yes, hi."},
+        {"role": "agent", "content": "Priya, I'm following up on your interest in our CRM software. Would you like to see a live demo?"},
+        {"role": "customer", "content": "Actually yes, I've been meaning to check it out. Can we do it this week?"},
+        {"role": "agent", "content": "Absolutely! How about Thursday at 11 AM?"},
+        {"role": "customer", "content": "Thursday works. Let me just block my calendar."},
+        {"role": "agent", "content": "I'll send you a calendar invite with the meeting link. Your registered email is priya@company.com, correct?"},
+        {"role": "customer", "content": "Yes, that's right."},
+        {"role": "agent", "content": "Perfect. Demo is booked for Thursday 11 AM. Looking forward to it!"},
+        {"role": "customer", "content": "Thanks, see you then."}
+      ],
+      "expected_disposition": "demo_booked",
+      "expected_lane": "hot"
+    },
+
+    "already_purchased": {
+      "description": "Customer already completed the action — LOW VALUE, batch is fine",
+      "transcript": [
+        {"role": "agent", "content": "Hello, is this Amit?"},
+        {"role": "customer", "content": "Yes."},
+        {"role": "agent", "content": "Amit, I'm calling about the health checkup package you were interested in."},
+        {"role": "customer", "content": "Oh, I already booked it through your website last week."},
+        {"role": "agent", "content": "That's great to hear! Is there anything else I can help with?"},
+        {"role": "customer", "content": "No, that's all. Thanks."},
+        {"role": "agent", "content": "Thank you Amit, have a great day."}
+      ],
+      "expected_disposition": "already_done",
+      "expected_lane": "cold"
+    },
+
+    "short_call_hangup": {
+      "description": "Very short call — customer hung up immediately. Should skip LLM entirely.",
+      "transcript": [
+        {"role": "agent", "content": "Hello, am I speaking with—"},
+        {"role": "customer", "content": "Wrong number."}
+      ],
+      "expected_disposition": "short_call",
+      "expected_lane": "skip"
+    },
+
+    "hinglish_ambiguous": {
+      "description": "Hinglish conversation where intent is ambiguous — keyword match alone cannot classify",
+      "transcript": [
+        {"role": "agent", "content": "Hello sir, Formi se bol raha hoon. Aapka trial period khatam ho raha hai."},
+        {"role": "customer", "content": "Haan, mujhe pata hai. Main soch raha hoon."},
+        {"role": "agent", "content": "Sir, kya aap renew karna chahenge? Abhi 20% discount chal raha hai."},
+        {"role": "customer", "content": "Dekhta hoon, kuch sochna padega. Budget tight hai but product accha hai."},
+        {"role": "agent", "content": "Main ek follow-up schedule kar doon?"},
+        {"role": "customer", "content": "Haan, next week bol lo."},
+        {"role": "agent", "content": "Done sir, next week call karunga. Thank you."},
+        {"role": "customer", "content": "Okay bye."}
+      ],
+      "expected_disposition": "considering",
+      "expected_lane": "cold"
+    },
+
+    "escalation_needed": {
+      "description": "Customer is angry and needs escalation — HIGH VALUE for different reasons",
+      "transcript": [
+        {"role": "agent", "content": "Hello, am I speaking with Mr. Verma?"},
+        {"role": "customer", "content": "Yes, and I've been waiting 3 days for my pickup! This is unacceptable."},
+        {"role": "agent", "content": "I sincerely apologize for the delay sir. Let me check your order status."},
+        {"role": "customer", "content": "I've already called 4 times. Nobody helps. I want to speak to a manager."},
+        {"role": "agent", "content": "Sir, I understand your frustration. Let me escalate this immediately and have a senior executive call you within the hour."},
+        {"role": "customer", "content": "Fine, but if nobody calls me back I'm going to file a complaint."},
+        {"role": "agent", "content": "You'll receive a call within 60 minutes, sir. I'm personally noting your case."},
+        {"role": "customer", "content": "Okay."}
+      ],
+      "expected_disposition": "escalation_needed",
+      "expected_lane": "hot"
+    }
+  }
+}
